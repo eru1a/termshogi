@@ -1,10 +1,12 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -13,10 +15,6 @@ import (
 	"github.com/eru1a/shogi-go/engine"
 	"github.com/gdamore/tcell"
 	"github.com/rivo/tview"
-)
-
-var (
-	enginePathFlag = flag.String("engine", "", "engine path")
 )
 
 type selectFrom struct {
@@ -328,11 +326,12 @@ func NewAnalysisView() *AnalysisView {
 		Table: tview.NewTable(),
 	}
 	analysisView.SetBorder(true).SetTitle("検討")
-	analysisView.SetCell(0, 0, tview.NewTableCell("時間"))
-	analysisView.SetCell(0, 1, tview.NewTableCell("深さ"))
-	analysisView.SetCell(0, 2, tview.NewTableCell("ノード数"))
-	analysisView.SetCell(0, 3, tview.NewTableCell("評価値"))
-	analysisView.SetCell(0, 4, tview.NewTableCell("読み筋"))
+	analysisView.SetCell(0, 0, tview.NewTableCell("R"))
+	analysisView.SetCell(0, 1, tview.NewTableCell("時間"))
+	analysisView.SetCell(0, 2, tview.NewTableCell("深さ"))
+	analysisView.SetCell(0, 3, tview.NewTableCell("ノード数"))
+	analysisView.SetCell(0, 4, tview.NewTableCell("評価値"))
+	analysisView.SetCell(0, 5, tview.NewTableCell("読み筋"))
 
 	analysisView.SetFixed(1, 0)
 	return analysisView
@@ -341,11 +340,12 @@ func NewAnalysisView() *AnalysisView {
 func (a *AnalysisView) Clear() {
 	a.Table.Clear()
 
-	a.SetCell(0, 0, tview.NewTableCell("時間"))
-	a.SetCell(0, 1, tview.NewTableCell("深さ"))
-	a.SetCell(0, 2, tview.NewTableCell("ノード数"))
-	a.SetCell(0, 3, tview.NewTableCell("評価値"))
-	a.SetCell(0, 4, tview.NewTableCell("読み筋"))
+	a.SetCell(0, 0, tview.NewTableCell("R"))
+	a.SetCell(0, 1, tview.NewTableCell("時間"))
+	a.SetCell(0, 2, tview.NewTableCell("深さ"))
+	a.SetCell(0, 3, tview.NewTableCell("ノード数"))
+	a.SetCell(0, 4, tview.NewTableCell("評価値"))
+	a.SetCell(0, 5, tview.NewTableCell("読み筋"))
 	a.SetFixed(1, 0)
 
 	a.Infos = []USIInfoWithKIFPv{}
@@ -361,23 +361,26 @@ func (a *AnalysisView) AppendInfo(info engine.USIInfo, p *shogi.Position, before
 }
 
 func (a *AnalysisView) updateOneInfo(row int, info USIInfoWithKIFPv) {
+	multipv := tview.NewTableCell(strconv.Itoa(info.MultiPv))
+	a.SetCell(row, 0, multipv)
+
 	time := tview.NewTableCell(strconv.Itoa(info.Time))
-	a.SetCell(row, 0, time)
+	a.SetCell(row, 1, time)
 
 	depth := tview.NewTableCell(strconv.Itoa(info.Depth))
-	a.SetCell(row, 1, depth)
+	a.SetCell(row, 2, depth)
 
 	nodes := tview.NewTableCell(strconv.Itoa(info.Nodes))
-	a.SetCell(row, 2, nodes)
+	a.SetCell(row, 3, nodes)
 
 	score := tview.NewTableCell(strconv.Itoa(info.ScoreCp))
 	if info.IsMate {
 		score = tview.NewTableCell(fmt.Sprintf("mate %d", info.ScoreMate))
 	}
-	a.SetCell(row, 3, score)
+	a.SetCell(row, 4, score)
 
 	pv := tview.NewTableCell(strings.Join(info.Pv, " "))
-	a.SetCell(row, 4, pv)
+	a.SetCell(row, 5, pv)
 }
 
 type View struct {
@@ -391,6 +394,7 @@ type View struct {
 	App             *tview.Application
 	Pages           *tview.Pages
 	Panels
+	Config *Config
 }
 
 func (v *View) UpdateView() {
@@ -433,7 +437,7 @@ type Panels struct {
 	Panels  []tview.Primitive
 }
 
-func NewView() *View {
+func NewView(config *Config) *View {
 	analysisView := NewAnalysisView()
 
 	app := tview.NewApplication()
@@ -446,6 +450,7 @@ func NewView() *View {
 		Game:            game,
 		App:             app,
 		Pages:           pages,
+		Config:          config,
 	}
 	positionView := NewPositionView(app, v, pages, game)
 	movesView := NewMovesView(v, game)
@@ -492,7 +497,7 @@ func (v *View) setup() {
 			// エンジンの起動・思考開始/停止をvキー1つで担う
 			if v.Engine == nil {
 				var err error
-				v.Engine, err = engine.NewEngine(*enginePathFlag)
+				v.Engine, err = engine.NewEngine(v.Config.EnginePath)
 				if err != nil {
 					log.Println(err)
 					return nil
@@ -500,6 +505,9 @@ func (v *View) setup() {
 				v.Engine.InfoC = v.EngineInfoC
 				go v.readEngineInfo()
 				v.Engine.SendUSI()
+				for _, option := range v.Config.EngineOptions {
+					v.Engine.SendSetOption(option[0], option[1])
+				}
 				v.Engine.SendIsReady()
 				log.Println("engine initialized")
 				v.analyze()
@@ -607,8 +615,45 @@ func (v *View) Run() error {
 	return nil
 }
 
+type Config struct {
+	EnginePath    string     `json:"engine_path"`
+	EngineOptions [][]string `json:"engine_options"`
+}
+
+const defaultConfigJSON = `{
+  "engine_path": "/path/to/yaneuraou",
+  "engine_options": [
+    ["Threads", "1"],
+    ["MultiPv", "3"]
+  ]
+}
+`
+
 func main() {
-	flag.Parse()
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		panic(err)
+	}
+	configFile := filepath.Join(configDir, "termshogi", "config.json")
+
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		if err := os.Mkdir(filepath.Dir(configFile), 0777); err != nil {
+			panic(err)
+		}
+		if err := ioutil.WriteFile(configFile, []byte(defaultConfigJSON), 0644); err != nil {
+			panic(err)
+		}
+	}
+
+	bytes, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		panic(err)
+	}
+
+	var config Config
+	if err := json.Unmarshal(bytes, &config); err != nil {
+		panic(err)
+	}
 
 	logWriter, err := os.OpenFile("termshogi.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
@@ -616,7 +661,7 @@ func main() {
 	}
 	log.SetOutput(logWriter)
 
-	view := NewView()
+	view := NewView(&config)
 	if err := view.Run(); err != nil {
 		panic(err)
 	}
