@@ -248,6 +248,12 @@ func NewMovesView(view *View, game *shogi.GameTree) *MovesView {
 		MoveList: []shogi.MoveData{},
 	}
 	movesView.SetBorder(true).SetTitle("棋譜")
+	movesView.SetSelectable(true, false)
+	movesView.Select(0, 0)
+	movesView.SetSelectionChangedFunc(func(row, col int) {
+		game.GotoNth(game.Root.Position.Ply + row)
+		view.UpdateView()
+	})
 	return movesView
 }
 
@@ -341,10 +347,7 @@ func (a *AnalysisView) Clear() {
 	a.SetCell(0, 3, tview.NewTableCell("評価値"))
 	a.SetCell(0, 4, tview.NewTableCell("読み筋"))
 	a.SetFixed(1, 0)
-}
 
-func (a *AnalysisView) Reset() {
-	a.Clear()
 	a.Infos = []USIInfoWithKIFPv{}
 }
 
@@ -354,7 +357,7 @@ func (a *AnalysisView) AppendInfo(info engine.USIInfo, p *shogi.Position, before
 		return
 	}
 	a.Infos = append(a.Infos, infoWithKIFPv)
-	a.UpdateView()
+	a.updateOneInfo(len(a.Infos), infoWithKIFPv)
 }
 
 func (a *AnalysisView) updateOneInfo(row int, info USIInfoWithKIFPv) {
@@ -377,13 +380,6 @@ func (a *AnalysisView) updateOneInfo(row int, info USIInfoWithKIFPv) {
 	a.SetCell(row, 4, pv)
 }
 
-func (a *AnalysisView) UpdateView() {
-	a.Clear()
-	for row, info := range a.Infos {
-		a.updateOneInfo(row+1, info)
-	}
-}
-
 type View struct {
 	PositionView    *PositionView
 	MovesView       *MovesView
@@ -395,6 +391,17 @@ type View struct {
 	App             *tview.Application
 	Pages           *tview.Pages
 	Panels
+}
+
+func (v *View) UpdateView() {
+	v.PositionView.UpdateView()
+	v.MovesView.UpdateView()
+	v.AnalysisView.Clear()
+
+	// 局面が更新された時に自動的に新しい局面でエンジンに思考させる
+	if v.Engine != nil && v.Engine.State == engine.Thinking {
+		v.analyze()
+	}
 }
 
 func (v *View) engineStateViewUpdateLoop() {
@@ -519,7 +526,6 @@ func (v *View) analyze() {
 		v.Engine.SendStop()
 		log.Println("> stop")
 	}
-	v.AnalysisView.Reset()
 	go func() {
 		// Idlingになるまで待つ
 		ticker := time.NewTicker(time.Millisecond * 100)
@@ -569,14 +575,11 @@ func (v *View) prevPanel() {
 func (v *View) Move(m shogi.Move) {
 	moveErr := v.PositionView.Game.Move(m)
 	v.PositionView.From.Cancel()
-	v.PositionView.UpdateView()
-	if moveErr != nil {
-		return
-	}
-	v.MovesView.UpdateView()
-
-	if v.Engine != nil && v.Engine.State == engine.Thinking {
-		v.analyze()
+	if moveErr == nil {
+		v.MovesView.Select(v.Game.Current.Position.Ply-v.Game.Root.Position.Ply, 0)
+	} else {
+		// selectFromのキャンセルを反映させる
+		v.PositionView.UpdateView()
 	}
 }
 
@@ -594,8 +597,7 @@ func (v *View) Run() error {
 		AddItem(v.EngineStateView, 1, 0, 1, 1, 0, 0, false)
 
 	v.Pages.AddAndSwitchToPage("main", grid2, true)
-	v.PositionView.UpdateView()
-	v.MovesView.UpdateView()
+	v.UpdateView()
 
 	if err := v.App.SetRoot(v.Pages, true).Run(); err != nil {
 		v.App.Stop()
